@@ -10,6 +10,10 @@ library(tidyr)
 library(forcats)
 
 
+# Allow uploads larger than Shiny's 5 MB default (e.g. large Picarro .dat files)
+options(shiny.maxRequestSize = 500 * 1024^2)
+
+
 # Define UI
 ui <- fluidPage( # begin ui
     # Application title
