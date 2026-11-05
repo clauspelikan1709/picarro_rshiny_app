@@ -89,7 +89,11 @@ ui <- fluidPage( # begin ui
             numericInput("sal", "Salinity (ppt)",
                          value = 0, step = 0.1),
             
-            
+            ## pressure
+            numericInput("pressure", "Pressure (atm)",
+                         value = 1, step = 0.1),
+
+
             # Options for table export
             h3("Table export options"),
             
@@ -197,6 +201,7 @@ ui <- fluidPage( # begin ui
                                  p("- Sample temperature in", strong("°C.")),
                                  p("- Volumes of liquid, headspace, and the injected gas sample, respectively, in", strong("mL.")),
                                  p("- Salinity in", strong("ppt"), "(for freshwater samples, leave at 0)."),
+                                 p("- Pressure in", strong("atm.")),
                                  
                                  br(),
                                  
@@ -713,6 +718,7 @@ server <- function(input, output) { # begin server function
     ### sample temperature in °C
     ### volumes of liquid, headspace, and injected sample gas in mL
     ### salinity (set to default of 0)
+    ### pressure in atm (set to default of 1)
     observeEvent(input$proceed, {
         
         meas_cond_user$df <- isolate(results_all_final()) %>%
@@ -721,7 +727,8 @@ server <- function(input, output) { # begin server function
                    liquid_mL = input$v_liq,
                    headspace_mL = input$v_hs,
                    injected_mL = input$v_inj,
-                   salinity_ppt = input$sal)
+                   salinity_ppt = input$sal,
+                   pressure_atm = input$pressure)
         
     })
     
@@ -774,7 +781,8 @@ server <- function(input, output) { # begin server function
                    liquid_mL = input$v_liq,
                    headspace_mL = input$v_hs,
                    injected_mL = input$v_inj,
-                   salinity_ppt = input$sal)
+                   salinity_ppt = input$sal,
+                   pressure_atm = input$pressure)
         
     })
     
@@ -835,7 +843,8 @@ server <- function(input, output) { # begin server function
                    v_liq = meas_cond_user$df$liquid_mL,
                    v_hs = meas_cond_user$df$headspace_mL,
                    v_inj = meas_cond_user$df$injected_mL,
-                   salin = meas_cond_user$df$salinity_ppt)
+                   salin = meas_cond_user$df$salinity_ppt,
+                   pressure_atm = meas_cond_user$df$pressure_atm)
         
     })
     
@@ -848,11 +857,11 @@ server <- function(input, output) { # begin server function
             mutate( # calculations for co2 concentrations
                 sol_co2 = exp(-58.0931 + 90.5069 * (100 / temp_k) + 22.294 * log(temp_k / 100) + 
                                   salin * (0.027766 - 0.025888 * (temp_k / 100) + 0.0050578 * (temp_k / 100)^2)), # solubility of co2 in mol/L/atm at given temperature and salinity
-                co2_hs_atm = co2_meas * 1e-06, # co2 concentration in headspace converted from ppm to atm (no dilution correction)
+                co2_hs_atm = co2_meas * pressure_atm * 1e-06, # co2 partial pressure in headspace converted from ppm to atm (no dilution correction)
                 co2_hs_pa = co2_hs_atm * 101325, # co2 concentration in headspace converted from atm to Pa
                 co2_hs_uM = (co2_hs_pa / (8.314 * temp_k)) * 1000, # co2 concentration in headspace converted from Pa to micromole/L
                 co2_hs_tot = (co2_hs_uM * v_hs) / 1000, # total micromoles of co2 in headspace
-                co2_aq_uM = sol_co2 * co2_meas, # co2 concentration in water after headspace equilibration in micromole/L (no dilution correction)
+                co2_aq_uM = sol_co2 * co2_meas * pressure_atm, # co2 concentration in water after headspace equilibration in micromole/L (no dilution correction)
                 co2_aq_tot = (co2_aq_uM * v_liq) / 1000, # total micromoles of co2 in water after headspace equilibration
                 co2_final_uM = ((co2_hs_tot + co2_aq_tot) / v_liq) * 1000, # final concentration of dissolved co2 in original water sample
                 
@@ -860,32 +869,32 @@ server <- function(input, output) { # begin server function
             mutate( # calculations for ch4 concentrations
                 sol_ch4 = exp(-68.8862 + 101.4956 * (100/temp_k) + 28.7314 * log(temp_k/100) + 
                                 salin * (-0.076146 + 0.043970* (temp_k/100) - 0.0068672*(temp_k/100)^2)), # solubility of ch4 in mol/L/atm at given temperature and salinity
-                ch4_hs_atm = ch4_meas * 1e-06, # ch4 concentration in headspace converted from ppm to atm (no dilution correction)
+                ch4_hs_atm = ch4_meas * pressure_atm * 1e-06, # ch4 partial pressure in headspace converted from ppm to atm (no dilution correction)
                 ch4_hs_pa = ch4_hs_atm * 101325, # ch4 concentration in headspace converted from atm to Pa
                 ch4_hs_uM = (ch4_hs_pa / (8.314 * temp_k)) * 1000, # ch4 concentration in headspace converted from Pa to micromole/L
                 ch4_hs_tot = (ch4_hs_uM * v_hs) / 1000, # total micromoles of ch4 in headspace
-                ch4_aq_uM = sol_ch4 * ch4_meas, # ch4 concentration in water after headspace equilibration in micromole/L (no dilution correction)
+                ch4_aq_uM = sol_ch4 * ch4_meas * pressure_atm, # ch4 concentration in water after headspace equilibration in micromole/L (no dilution correction)
                 ch4_aq_tot = (ch4_aq_uM * v_liq) / 1000, # total micromoles of ch4 in water after headspace equilibration
                 ch4_final_uM = ((ch4_hs_tot + ch4_aq_tot) / v_liq) * 1000, # final concentration of dissolved ch4 in original water sample
                 
             ) %>%
             mutate( # calculations for technical standard deviation for co2
-                sd_co2_hs_atm = sd_co2 * 1e-06, # co2 concentration in headspace converted from ppm to atm (no dilution correction)
+                sd_co2_hs_atm = sd_co2 * pressure_atm * 1e-06, # co2 partial pressure in headspace converted from ppm to atm (no dilution correction)
                 sd_co2_hs_pa = sd_co2_hs_atm * 101325, # co2 concentration in headspace converted from atm to Pa
                 sd_co2_hs_uM = (sd_co2_hs_pa / (8.314 * temp_k)) * 1000, # co2 concentration in headspace converted from Pa to micromole/L
                 sd_co2_hs_tot = (sd_co2_hs_uM * v_hs) / 1000, # total micromoles of co2 in headspace
-                sd_co2_aq_uM = sol_co2 * sd_co2, # co2 concentration in water after headspace equilibration in micromole/L (no dilution correction)
+                sd_co2_aq_uM = sol_co2 * sd_co2 * pressure_atm, # co2 concentration in water after headspace equilibration in micromole/L (no dilution correction)
                 sd_co2_aq_tot = (sd_co2_aq_uM * v_liq) / 1000, # total micromoles of co2 in water after headspace equilibration
                 sd_co2_final_uM = ((sd_co2_hs_tot + sd_co2_aq_tot) / v_liq) * 1000, # final concentration of dissolved co2 in original water sample
                 
             ) %>%
             
             mutate( # calculations for technical standard deviation for ch4
-                sd_ch4_hs_atm = sd_ch4 * 1e-06, # ch4 concentration in headspace converted from ppm to atm (no dilution correction)
+                sd_ch4_hs_atm = sd_ch4 * pressure_atm * 1e-06, # ch4 partial pressure in headspace converted from ppm to atm (no dilution correction)
                 sd_ch4_hs_pa = sd_ch4_hs_atm * 101325, # ch4 concentration in headspace converted from atm to Pa
                 sd_ch4_hs_uM = (sd_ch4_hs_pa / (8.314 * temp_k)) * 1000, # ch4 concentration in headspace converted from Pa to micromole/L
                 sd_ch4_hs_tot = (sd_ch4_hs_uM * v_hs) / 1000, # total micromoles of ch4 in headspace
-                sd_ch4_aq_uM = sol_ch4 * sd_ch4, # ch4 concentration in water after headspace equilibration in micromole/L (no dilution correction)
+                sd_ch4_aq_uM = sol_ch4 * sd_ch4 * pressure_atm, # ch4 concentration in water after headspace equilibration in micromole/L (no dilution correction)
                 sd_ch4_aq_tot = (sd_ch4_aq_uM * v_liq) / 1000, # total micromoles of ch4 in water after headspace equilibration
                 sd_ch4_final_uM = ((sd_ch4_hs_tot + sd_ch4_aq_tot) / v_liq) * 1000, # final concentration of dissolved ch4 in original water sample
                 
