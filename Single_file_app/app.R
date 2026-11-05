@@ -1,5 +1,5 @@
 # R Shiny app to process and analyze raw Picarro CRDS analyzer data
-# Modified version with corrections for CH4 solubility and dilution factor
+# Modified version with corrected CH4 solubility units and water-vapour correction
 
 # Packages
 library(shiny)
@@ -844,7 +844,9 @@ server <- function(input, output) { # begin server function
                    v_hs = meas_cond_user$df$headspace_mL,
                    v_inj = meas_cond_user$df$injected_mL,
                    salin = meas_cond_user$df$salinity_ppt,
-                   pressure_atm = meas_cond_user$df$pressure_atm)
+                   pressure_atm = meas_cond_user$df$pressure_atm,
+                   co2_dry = grepl("_dry", input$co2_vals),
+                   ch4_dry = grepl("_dry", input$ch4_vals))
         
     })
     
@@ -853,51 +855,51 @@ server <- function(input, output) { # begin server function
     calc_conc_raw <- reactive({
         
         df_for_calc$df %>%
-            mutate(temp_k = temp_c + 273.15) %>% # temperature in kelvin
+            mutate( # temperature and water vapour conditions
+                temp_k = temp_c + 273.15, # temperature in kelvin
+                p_h2o = exp(24.4543 - 67.4509 * (100 / temp_k) - 4.8489 * log(temp_k / 100) - 0.000544 * salin), # water vapour partial pressure in atm
+                p_dry_co2 = if_else(co2_dry, pressure_atm - p_h2o, pressure_atm), # partial pressure of dry co2 in headspace in atm
+                p_dry_ch4 = if_else(ch4_dry, pressure_atm - p_h2o, pressure_atm) # partial pressure of dry ch4 in headspace in atm
+            ) %>%
             mutate( # calculations for co2 concentrations
                 sol_co2 = exp(-58.0931 + 90.5069 * (100 / temp_k) + 22.294 * log(temp_k / 100) + 
                                   salin * (0.027766 - 0.025888 * (temp_k / 100) + 0.0050578 * (temp_k / 100)^2)), # solubility of co2 in mol/L/atm at given temperature and salinity
-                co2_hs_atm = co2_meas * pressure_atm * 1e-06, # co2 partial pressure in headspace converted from ppm to atm (no dilution correction)
+                co2_hs_atm = co2_meas * 1e-06 * p_dry_co2, # co2 partial pressure in headspace converted from ppm to atm
                 co2_hs_pa = co2_hs_atm * 101325, # co2 concentration in headspace converted from atm to Pa
                 co2_hs_uM = (co2_hs_pa / (8.314 * temp_k)) * 1000, # co2 concentration in headspace converted from Pa to micromole/L
                 co2_hs_tot = (co2_hs_uM * v_hs) / 1000, # total micromoles of co2 in headspace
-                co2_aq_uM = sol_co2 * co2_meas * pressure_atm, # co2 concentration in water after headspace equilibration in micromole/L (no dilution correction)
+                co2_aq_uM = sol_co2 * co2_hs_atm * 1e6, # co2 concentration in water after headspace equilibration in micromole/L (no conversion by molar volume needed for co2)
                 co2_aq_tot = (co2_aq_uM * v_liq) / 1000, # total micromoles of co2 in water after headspace equilibration
                 co2_final_uM = ((co2_hs_tot + co2_aq_tot) / v_liq) * 1000, # final concentration of dissolved co2 in original water sample
                 
-            ) %>%
-            mutate( # calculations for ch4 concentrations
-                sol_ch4 = exp(-68.8862 + 101.4956 * (100/temp_k) + 28.7314 * log(temp_k/100) + 
-                                salin * (-0.076146 + 0.043970* (temp_k/100) - 0.0068672*(temp_k/100)^2)), # solubility of ch4 in mol/L/atm at given temperature and salinity
-                ch4_hs_atm = ch4_meas * pressure_atm * 1e-06, # ch4 partial pressure in headspace converted from ppm to atm (no dilution correction)
+                # calculations for ch4 concentrations
+                beta_ch4 = exp(-68.8862 + 101.4956 * (100/temp_k) + 28.7314 * log(temp_k/100) + 
+                                salin * (-0.076146 + 0.043970* (temp_k/100) - 0.0068672*(temp_k/100)^2)), # solubility of ch4 as L gas (STP) per L water per atm at given temperature and salinity
+                ch4_hs_atm = ch4_meas * 1e-06 * p_dry_ch4, # ch4 partial pressure in headspace converted from ppm to atm
                 ch4_hs_pa = ch4_hs_atm * 101325, # ch4 concentration in headspace converted from atm to Pa
                 ch4_hs_uM = (ch4_hs_pa / (8.314 * temp_k)) * 1000, # ch4 concentration in headspace converted from Pa to micromole/L
                 ch4_hs_tot = (ch4_hs_uM * v_hs) / 1000, # total micromoles of ch4 in headspace
-                ch4_aq_uM = sol_ch4 * ch4_meas * pressure_atm, # ch4 concentration in water after headspace equilibration in micromole/L (no dilution correction)
+                ch4_aq_uM = beta_ch4 * ch4_hs_atm / 22.414 * 1e6, # ch4 concentration in water after headspace equilibration in micromole/L (divide by molar volume to convert beta to mol/L/atm)
                 ch4_aq_tot = (ch4_aq_uM * v_liq) / 1000, # total micromoles of ch4 in water after headspace equilibration
                 ch4_final_uM = ((ch4_hs_tot + ch4_aq_tot) / v_liq) * 1000, # final concentration of dissolved ch4 in original water sample
                 
-            ) %>%
-            mutate( # calculations for technical standard deviation for co2
-                sd_co2_hs_atm = sd_co2 * pressure_atm * 1e-06, # co2 partial pressure in headspace converted from ppm to atm (no dilution correction)
+                # calculations for technical standard deviation for co2
+                sd_co2_hs_atm = sd_co2 * 1e-06 * p_dry_co2, # co2 partial pressure in headspace converted from ppm to atm
                 sd_co2_hs_pa = sd_co2_hs_atm * 101325, # co2 concentration in headspace converted from atm to Pa
                 sd_co2_hs_uM = (sd_co2_hs_pa / (8.314 * temp_k)) * 1000, # co2 concentration in headspace converted from Pa to micromole/L
                 sd_co2_hs_tot = (sd_co2_hs_uM * v_hs) / 1000, # total micromoles of co2 in headspace
-                sd_co2_aq_uM = sol_co2 * sd_co2 * pressure_atm, # co2 concentration in water after headspace equilibration in micromole/L (no dilution correction)
+                sd_co2_aq_uM = sol_co2 * sd_co2_hs_atm * 1e6, # co2 concentration in water after headspace equilibration in micromole/L (no conversion by molar volume needed for co2)
                 sd_co2_aq_tot = (sd_co2_aq_uM * v_liq) / 1000, # total micromoles of co2 in water after headspace equilibration
                 sd_co2_final_uM = ((sd_co2_hs_tot + sd_co2_aq_tot) / v_liq) * 1000, # final concentration of dissolved co2 in original water sample
                 
-            ) %>%
-            
-            mutate( # calculations for technical standard deviation for ch4
-                sd_ch4_hs_atm = sd_ch4 * pressure_atm * 1e-06, # ch4 partial pressure in headspace converted from ppm to atm (no dilution correction)
+                # calculations for technical standard deviation for ch4
+                sd_ch4_hs_atm = sd_ch4 * 1e-06 * p_dry_ch4, # ch4 partial pressure in headspace converted from ppm to atm
                 sd_ch4_hs_pa = sd_ch4_hs_atm * 101325, # ch4 concentration in headspace converted from atm to Pa
                 sd_ch4_hs_uM = (sd_ch4_hs_pa / (8.314 * temp_k)) * 1000, # ch4 concentration in headspace converted from Pa to micromole/L
                 sd_ch4_hs_tot = (sd_ch4_hs_uM * v_hs) / 1000, # total micromoles of ch4 in headspace
-                sd_ch4_aq_uM = sol_ch4 * sd_ch4 * pressure_atm, # ch4 concentration in water after headspace equilibration in micromole/L (no dilution correction)
+                sd_ch4_aq_uM = beta_ch4 * sd_ch4_hs_atm / 22.414 * 1e6, # ch4 concentration in water after headspace equilibration in micromole/L (divide by molar volume to convert beta to mol/L/atm)
                 sd_ch4_aq_tot = (sd_ch4_aq_uM * v_liq) / 1000, # total micromoles of ch4 in water after headspace equilibration
-                sd_ch4_final_uM = ((sd_ch4_hs_tot + sd_ch4_aq_tot) / v_liq) * 1000, # final concentration of dissolved ch4 in original water sample
-                
+                sd_ch4_final_uM = ((sd_ch4_hs_tot + sd_ch4_aq_tot) / v_liq) * 1000 # final concentration of dissolved ch4 in original water sample
             )
         
     })
