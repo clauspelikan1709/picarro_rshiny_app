@@ -1,5 +1,6 @@
 # R Shiny app to process and analyze raw Picarro CRDS analyzer data
-# Modified version with corrected CH4 solubility units and water-vapour correction
+# Modified version with corrected CH4 solubility units, water-vapour correction,
+# and parallel 12C/13C isotope concentration calculations
 
 # Packages
 library(shiny)
@@ -12,6 +13,45 @@ library(forcats)
 
 # Allow uploads larger than Shiny's 5 MB default (e.g. large Picarro .dat files)
 options(shiny.maxRequestSize = 500 * 1024^2)
+
+
+# Solubility and concentration conversion helpers
+# Concentrations are given in ppm, volumes in mL, and temperature in K.
+
+## solubility of CO2 in mol/L/atm at a given temperature and salinity
+solubility_co2 <- function(temp_k, salin) {
+    exp(-58.0931 + 90.5069 * (100 / temp_k) + 22.294 * log(temp_k / 100) +
+            salin * (0.027766 - 0.025888 * (temp_k / 100) + 0.0050578 * (temp_k / 100)^2))
+}
+
+## solubility of CH4 as L gas (STP) per L water per atm at a given temperature and salinity
+solubility_ch4 <- function(temp_k, salin) {
+    exp(-68.8862 + 101.4956 * (100 / temp_k) + 28.7314 * log(temp_k / 100) +
+            salin * (-0.076146 + 0.043970 * (temp_k / 100) - 0.0068672 * (temp_k / 100)^2))
+}
+
+## concentration of a gas in the headspace in micromole/L
+headspace_uM <- function(ppm, temp_k, p_dry_atm) {
+    (ppm * 1e-06 * p_dry_atm * 101325 / (8.314 * temp_k)) * 1000
+}
+
+## final dissolved CO2 concentration in the original water sample in micromole/L
+dissolved_co2_uM <- function(ppm, temp_k, p_dry_atm, v_hs, v_liq, sol_co2) {
+    hs_uM <- headspace_uM(ppm, temp_k, p_dry_atm)
+    hs_tot <- hs_uM * v_hs / 1000
+    aq_uM <- sol_co2 * (ppm * 1e-06 * p_dry_atm) * 1e6
+    aq_tot <- aq_uM * v_liq / 1000
+    ((hs_tot + aq_tot) / v_liq) * 1000
+}
+
+## final dissolved CH4 concentration in the original water sample in micromole/L
+dissolved_ch4_uM <- function(ppm, temp_k, p_dry_atm, v_hs, v_liq, beta_ch4) {
+    hs_uM <- headspace_uM(ppm, temp_k, p_dry_atm)
+    hs_tot <- hs_uM * v_hs / 1000
+    aq_uM <- beta_ch4 * (ppm * 1e-06 * p_dry_atm) / 22.414 * 1e6
+    aq_tot <- aq_uM * v_liq / 1000
+    ((hs_tot + aq_tot) / v_liq) * 1000
+}
 
 
 # Define UI
@@ -45,17 +85,16 @@ ui <- fluidPage( # begin ui
             # Reactive dropdown menus to select data columns for analysis
             h3("Select raw data columns"),
             
-            ## column with CO2 values
-            uiOutput("co2_vals"),
+            p("12C columns must be dry mole fractions; 13C columns are measured wet and are converted to dry values in the app."),
             
-            ## column with CH4 values
-            uiOutput("ch4_vals"),
+            ## 12C and 13C CO2 columns
+            uiOutput("co2_12_vals"),
+            uiOutput("co2_13_vals"),
             
-            ## column with delta13C values for CO2
-            uiOutput("d13co2_vals"),
-            
-            ## column with delta13 values for CH2
-            uiOutput("d13ch4_vals"),
+            ## 12C and 13C CH4 columns
+            uiOutput("ch4_12_vals"),
+            uiOutput("ch4_13_vals"),
+            p(em("Use HR columns above 12 ppm CH4 and HP columns below 12 ppm.")),
             
             
             # Options for automatic plateau detection
@@ -243,6 +282,8 @@ ui <- fluidPage( # begin ui
                                  
                                  br(),
                                  
+                                 p("Final concentrations are given in µmol/L (µM) and nmol/L. delta13C and the atom fraction of 13C (AF_13C) are calculated from the final 12C and 13C concentrations."),
+                                 
                                  # table with calculated results
                                  DTOutput("final_conc")
                                  
@@ -319,68 +360,48 @@ server <- function(input, output) { # begin server function
     
     
     ## render options for selecting data columns for the analysis
-    ### CO2 concentrations
-    output$co2_vals <- renderUI({
+    ### 12C and 13C CO2 concentrations
+    output$co2_12_vals <- renderUI({
         
         if(is.null(input$dat_files)){return ()}
         
-        selectInput("co2_vals", "Select column with CO2 concentrations",
-                    choices = c("12CO2" = "X12CO2",
-                                "12CO2_dry" = "X12CO2_dry",
-                                "13CO2" = "X13CO2"),
+        selectInput("co2_12_vals", "Select column with 12C CO2 concentrations (dry)",
+                    choices = c("12CO2_dry" = "X12CO2_dry"),
                     selected = "X12CO2_dry")
         
     })
     
-    
-    ### CH4 concentrations
-    output$ch4_vals <- renderUI({
+    output$co2_13_vals <- renderUI({
         
         if(is.null(input$dat_files)){return ()}
         
-        selectInput("ch4_vals", "Select column with CH4 concentrations",
-                    choices = c("HP_12CH4",
-                                "HR_12CH4",
-                                "HP_12CH4_dry",
-                                "HR_12CH4_dry",
-                                "HP_13CH4",
-                                "HR_13CH4"),
-                    selected = "HR_12CH4_dry")
+        selectInput("co2_13_vals", "Select column with 13C CO2 concentrations (wet)",
+                    choices = c("13CO2" = "X13CO2"),
+                    selected = "X13CO2")
         
     })
     
     
-    ### delta13C values for CO2
-    output$d13co2_vals <- renderUI({
+    ### 12C and 13C CH4 concentrations
+    output$ch4_12_vals <- renderUI({
         
         if(is.null(input$dat_files)){return ()}
         
-        selectInput("d13co2_vals", "Select column with delta13C values for CO2",
-                    choices = c("Delta_Raw_iCO2",
-                                "Delta_30s_iCO2",
-                                "Delta_2min_iCO2",
-                                "Delta_5min_iCO2"),
-                    selected = "Delta_30s_iCO2")
+        selectInput("ch4_12_vals", "Select column with 12C CH4 concentrations (dry)",
+                    choices = c("HP_12CH4_dry" = "HP_12CH4_dry",
+                                "HR_12CH4_dry" = "HR_12CH4_dry"),
+                    selected = "HP_12CH4_dry")
         
     })
     
-    
-    ### delta13C values for CH4
-    output$d13ch4_vals <- renderUI({
+    output$ch4_13_vals <- renderUI({
         
         if(is.null(input$dat_files)){return ()}
         
-        selectInput("d13ch4_vals", "Select column with delta13C values for CH4",
-                    choices = c("Delta_iCH4_Raw",
-                                "HP_Delta_iCH4_Raw",
-                                "HP_Delta_iCH4_30s",
-                                "HP_Delta_iCH4_2min",
-                                "HP_Delta_iCH4_5min",
-                                "HR_Delta_iCH4_Raw",
-                                "HR_Delta_iCH4_30s",
-                                "HR_Delta_iCH4_2min",
-                                "HR_Delta_iCH4_5min"),
-                    selected = "HR_Delta_iCH4_30s")
+        selectInput("ch4_13_vals", "Select column with 13C CH4 concentrations (wet)",
+                    choices = c("HP_13CH4" = "HP_13CH4",
+                                "HR_13CH4" = "HR_13CH4"),
+                    selected = "HP_13CH4")
         
     })
     
@@ -406,6 +427,8 @@ server <- function(input, output) { # begin server function
     ### plateau time points identified with default method based on variability of CO2 concentrations over time
     default_plateau <- reactive({
         
+        req(input$co2_12_vals)
+        
         # empty vector
         plat <- rep(0, nrow(df_raw()))
         
@@ -414,8 +437,8 @@ server <- function(input, output) { # begin server function
         
         for(i in 10:(length(plat))){ # begin loop
             
-            if(df_raw()[i, input$co2_vals] > input$co2_thresh &&
-               sd(df_raw()[i:(i-10), input$co2_vals]) / mean(df_raw()[i:(i-10), input$co2_vals]) < input$co2_tol) {plat[i] <- 1}
+            if(df_raw()[i, input$co2_12_vals] > input$co2_thresh &&
+               sd(df_raw()[i:(i-10), input$co2_12_vals]) / mean(df_raw()[i:(i-10), input$co2_12_vals]) < input$co2_tol) {plat[i] <- 1}
             else {plat[i] <- 0}
             
         } # end loop
@@ -447,13 +470,44 @@ server <- function(input, output) { # begin server function
     ## create new dataframe for the analysis
     df_analysis <- reactive({
         
-        # wait until the plateau time window has been defined
-        req(input$plateau_window)
+        # wait until the plateau time window and column selections have been defined
+        req(input$plateau_window, input$co2_12_vals, input$co2_13_vals,
+            input$ch4_12_vals, input$ch4_13_vals)
         
-        df_raw() %>%
-            select(c(datetime, meas_time_sec, input$co2_vals, input$ch4_vals, input$d13co2_vals, input$d13ch4_vals)) %>%
-            mutate(plateau = between(datetime, left = input$plateau_window[1],
-                                     right = input$plateau_window[2]))
+        df <- df_raw()
+        
+        co2_12_col <- input$co2_12_vals
+        co2_13_col <- input$co2_13_vals
+        ch4_12_col <- input$ch4_12_vals
+        ch4_13_col <- input$ch4_13_vals
+        
+        # wet 12C counterpart of the selected dry 12C CO2 column
+        co2_12_wet_col <- sub("_dry$", "", co2_12_col)
+        
+        # CH4 measurement mode (HP or HR) is defined by the selected 13C column;
+        # the 12C dry/wet columns from the same mode are used for the dry correction
+        ch4_mode <- sub("_13CH4$", "", ch4_13_col)
+        ch4_12_wet_col <- paste0(ch4_mode, "_12CH4")
+        ch4_12_dry_col <- paste0(ch4_mode, "_12CH4_dry")
+        
+        validate(
+            need(sub("_12CH4_dry$", "", ch4_12_col) == ch4_mode,
+                 "Please select 12C and 13C CH4 columns from the same measurement mode (HP or HR)."),
+            need(all(c(co2_12_col, co2_13_col, co2_12_wet_col,
+                       ch4_12_col, ch4_13_col, ch4_12_wet_col, ch4_12_dry_col) %in% names(df)),
+                 "One or more selected columns are not present in this data file.")
+        )
+        
+        data.frame(
+            datetime = df$datetime,
+            meas_time_sec = df$meas_time_sec,
+            co2_12 = df[[co2_12_col]],
+            co2_13 = df[[co2_13_col]] * (df[[co2_12_col]] / df[[co2_12_wet_col]]),
+            ch4_12 = df[[ch4_12_col]],
+            ch4_13 = df[[ch4_13_col]] * (df[[ch4_12_dry_col]] / df[[ch4_12_wet_col]]),
+            plateau = df$datetime >= input$plateau_window[1] &
+                      df$datetime <= input$plateau_window[2]
+        )
         
     })
     
@@ -462,15 +516,15 @@ server <- function(input, output) { # begin server function
     draw_plot <- function(text_large = 14, text_small = 12){
         
         df_analysis() %>%
-            pivot_longer(cols = -c(datetime, meas_time_sec, plateau),
+            pivot_longer(cols = c(co2_12, co2_13, ch4_12, ch4_13),
                          values_to = "vals", names_to = "var") %>%
-            mutate(var_lab = case_when(var == input$co2_vals ~ "CO2 (ppm)",
-                                       var == input$ch4_vals ~ "CH4 (ppm)",
-                                       var == input$d13co2_vals ~ "delta13C, CO2 (permil)",
-                                       var == input$d13ch4_vals ~ "delta13C, CH4 (permil)"),
+            mutate(var_lab = case_when(var == "co2_12" ~ "12CO2 (ppm, dry)",
+                                       var == "co2_13" ~ "13CO2 (ppm, dry-corrected)",
+                                       var == "ch4_12" ~ "12CH4 (ppm, dry)",
+                                       var == "ch4_13" ~ "13CH4 (ppm, dry-corrected)"),
                    plateau = case_when(plateau == TRUE ~ "Yes",
                                        plateau == FALSE ~ "No")) %>%
-            mutate(var_lab = fct_relevel(.$var_lab, c("CO2 (ppm)", "CH4 (ppm)", "delta13C, CO2 (permil)", "delta13C, CH4 (permil)")),
+            mutate(var_lab = fct_relevel(.$var_lab, c("12CO2 (ppm, dry)", "13CO2 (ppm, dry-corrected)", "12CH4 (ppm, dry)", "13CH4 (ppm, dry-corrected)")),
                    plateau = fct_relevel(.$plateau, c("Yes", "No"))) %>%
             ggplot(aes(x = datetime, y = vals, colour = plateau)) +
             geom_point(shape = 1, size = 3) +
@@ -562,17 +616,21 @@ server <- function(input, output) { # begin server function
         
         df_analysis() %>% filter(plateau == TRUE) %>%
             select(-c(datetime, plateau)) %>%
-            rename_all(~ c("sec", "co2", "ch4", "d13co2", "d13ch4")) %>%
+            rename_all(~ c("sec", "co2_12", "co2_13", "ch4_12", "ch4_13")) %>%
             summarise(seconds_plateau = abs(diff(range(sec))),
                       n_data_points = n(),
-                      mean_co2_ppm = mean(co2),
-                      sd_co2_ppm = sd(co2),
-                      mean_ch4_ppm = mean(ch4),
-                      sd_ch4_ppm = sd(ch4),
-                      mean_d13C_co2_permil = mean(d13co2),
-                      sd_d13C_co2_permil = sd(d13co2),
-                      mean_d13C_ch4_permil = mean(d13ch4),
-                      sd_d13C_ch4_permil = sd(d13ch4))
+                      mean_co2_12_ppm = mean(co2_12),
+                      sd_co2_12_ppm = sd(co2_12),
+                      mean_co2_13_ppm = mean(co2_13),
+                      sd_co2_13_ppm = sd(co2_13),
+                      mean_ch4_12_ppm = mean(ch4_12),
+                      sd_ch4_12_ppm = sd(ch4_12),
+                      mean_ch4_13_ppm = mean(ch4_13),
+                      sd_ch4_13_ppm = sd(ch4_13),
+                      mean_co2_total_ppm = mean(co2_12 + co2_13),
+                      sd_co2_total_ppm = sd(co2_12 + co2_13),
+                      mean_ch4_total_ppm = mean(ch4_12 + ch4_13),
+                      sd_ch4_total_ppm = sd(ch4_12 + ch4_13))
         
     })
     
@@ -622,7 +680,7 @@ server <- function(input, output) { # begin server function
         
         # if a table already exists after the first click, add new results to existing table
         else{
-            results_collect$df <<- rbind(results_collect$df,
+            results_collect$df <- rbind(results_collect$df,
                                          results_i_table()  %>%
                                              mutate(data_file = input$data_file,
                                                     date = df_raw()[1, "DATE"],
@@ -636,7 +694,7 @@ server <- function(input, output) { # begin server function
     ## render choices to exclude individual rows in results table
     output$excl_rows <- renderUI({
         
-        if(is.null(input$dat_files)){return ()}
+        if(is.null(input$dat_files) || is.null(results_collect$df)){return ()}
         
         selectInput("excl_rows", "Exclude table rows",
                     choices = c("None" = 0,
@@ -650,11 +708,16 @@ server <- function(input, output) { # begin server function
     ## subset results table based on selected rows to exclude
     results_all_final <- reactive({
         
-        if(input$excl_rows == 0){
+        if(is.null(results_collect$df)){return (NULL)}
+        
+        excl <- as.numeric(input$excl_rows)
+        excl <- excl[!is.na(excl) & excl != 0]
+        
+        if(length(excl) == 0){
             results_collect$df
         }
         else{
-            results_collect$df[-which(as.numeric(rownames(results_collect$df)) %in% input$excl_rows), ]
+            results_collect$df[-excl, , drop = FALSE]
         }
         
     })
@@ -666,8 +729,7 @@ server <- function(input, output) { # begin server function
         if(is.null(results_collect$df)){return ()}
         
         datatable(results_all_final() %>%
-                      mutate_at(vars(-c(1:3, 5)), function(x) round(x, digits = 2)) %>%
-                      mutate_at(vars(4), function(x) round(x, digits = 0)),
+                      mutate(across(where(is.numeric), ~ round(.x, digits = 4))),
                   
                   options = list(paging = FALSE,
                                  ordering = FALSE,
@@ -831,22 +893,31 @@ server <- function(input, output) { # begin server function
         
         df_for_calc$df <- isolate(results_all_final()) %>%
             select(c("data_file", "date",
-                     "mean_co2_ppm", "sd_co2_ppm", "mean_ch4_ppm", "sd_ch4_ppm",
-                     "mean_d13C_co2_permil", "sd_d13C_co2_permil",
-                     "mean_d13C_ch4_permil", "sd_d13C_ch4_permil")) %>%
+                     "mean_co2_12_ppm", "sd_co2_12_ppm",
+                     "mean_co2_13_ppm", "sd_co2_13_ppm",
+                     "mean_co2_total_ppm", "sd_co2_total_ppm",
+                     "mean_ch4_12_ppm", "sd_ch4_12_ppm",
+                     "mean_ch4_13_ppm", "sd_ch4_13_ppm",
+                     "mean_ch4_total_ppm", "sd_ch4_total_ppm")) %>%
             mutate(sample_name = meas_cond_user$df$sample_name, .before = 3) %>%
-            rename(co2_meas = mean_co2_ppm,
-                   sd_co2 = sd_co2_ppm,
-                   ch4_meas = mean_ch4_ppm,
-                   sd_ch4 = sd_ch4_ppm) %>%
+            rename(co2_12_meas = mean_co2_12_ppm,
+                   sd_co2_12 = sd_co2_12_ppm,
+                   co2_13_meas = mean_co2_13_ppm,
+                   sd_co2_13 = sd_co2_13_ppm,
+                   co2_total_meas = mean_co2_total_ppm,
+                   sd_co2_total = sd_co2_total_ppm,
+                   ch4_12_meas = mean_ch4_12_ppm,
+                   sd_ch4_12 = sd_ch4_12_ppm,
+                   ch4_13_meas = mean_ch4_13_ppm,
+                   sd_ch4_13 = sd_ch4_13_ppm,
+                   ch4_total_meas = mean_ch4_total_ppm,
+                   sd_ch4_total = sd_ch4_total_ppm) %>%
             mutate(temp_c = meas_cond_user$df$temperature_C,
                    v_liq = meas_cond_user$df$liquid_mL,
                    v_hs = meas_cond_user$df$headspace_mL,
                    v_inj = meas_cond_user$df$injected_mL,
                    salin = meas_cond_user$df$salinity_ppt,
-                   pressure_atm = meas_cond_user$df$pressure_atm,
-                   co2_dry = grepl("_dry", input$co2_vals),
-                   ch4_dry = grepl("_dry", input$ch4_vals))
+                   pressure_atm = meas_cond_user$df$pressure_atm)
         
     })
     
@@ -855,51 +926,50 @@ server <- function(input, output) { # begin server function
     calc_conc_raw <- reactive({
         
         df_for_calc$df %>%
-            mutate( # temperature and water vapour conditions
+            mutate(
+                # temperature and water vapour conditions
                 temp_k = temp_c + 273.15, # temperature in kelvin
                 p_h2o = exp(24.4543 - 67.4509 * (100 / temp_k) - 4.8489 * log(temp_k / 100) - 0.000544 * salin), # water vapour partial pressure in atm
-                p_dry_co2 = if_else(co2_dry, pressure_atm - p_h2o, pressure_atm), # partial pressure of dry co2 in headspace in atm
-                p_dry_ch4 = if_else(ch4_dry, pressure_atm - p_h2o, pressure_atm) # partial pressure of dry ch4 in headspace in atm
-            ) %>%
-            mutate( # calculations for co2 concentrations
-                sol_co2 = exp(-58.0931 + 90.5069 * (100 / temp_k) + 22.294 * log(temp_k / 100) + 
-                                  salin * (0.027766 - 0.025888 * (temp_k / 100) + 0.0050578 * (temp_k / 100)^2)), # solubility of co2 in mol/L/atm at given temperature and salinity
-                co2_hs_atm = co2_meas * 1e-06 * p_dry_co2, # co2 partial pressure in headspace converted from ppm to atm
-                co2_hs_pa = co2_hs_atm * 101325, # co2 concentration in headspace converted from atm to Pa
-                co2_hs_uM = (co2_hs_pa / (8.314 * temp_k)) * 1000, # co2 concentration in headspace converted from Pa to micromole/L
-                co2_hs_tot = (co2_hs_uM * v_hs) / 1000, # total micromoles of co2 in headspace
-                co2_aq_uM = sol_co2 * co2_hs_atm * 1e6, # co2 concentration in water after headspace equilibration in micromole/L (no conversion by molar volume needed for co2)
-                co2_aq_tot = (co2_aq_uM * v_liq) / 1000, # total micromoles of co2 in water after headspace equilibration
-                co2_final_uM = ((co2_hs_tot + co2_aq_tot) / v_liq) * 1000, # final concentration of dissolved co2 in original water sample
+                p_dry = pressure_atm - p_h2o, # 12C and dry-corrected 13C values are dry mole fractions
                 
-                # calculations for ch4 concentrations
-                beta_ch4 = exp(-68.8862 + 101.4956 * (100/temp_k) + 28.7314 * log(temp_k/100) + 
-                                salin * (-0.076146 + 0.043970* (temp_k/100) - 0.0068672*(temp_k/100)^2)), # solubility of ch4 as L gas (STP) per L water per atm at given temperature and salinity
-                ch4_hs_atm = ch4_meas * 1e-06 * p_dry_ch4, # ch4 partial pressure in headspace converted from ppm to atm
-                ch4_hs_pa = ch4_hs_atm * 101325, # ch4 concentration in headspace converted from atm to Pa
-                ch4_hs_uM = (ch4_hs_pa / (8.314 * temp_k)) * 1000, # ch4 concentration in headspace converted from Pa to micromole/L
-                ch4_hs_tot = (ch4_hs_uM * v_hs) / 1000, # total micromoles of ch4 in headspace
-                ch4_aq_uM = beta_ch4 * ch4_hs_atm / 22.414 * 1e6, # ch4 concentration in water after headspace equilibration in micromole/L (divide by molar volume to convert beta to mol/L/atm)
-                ch4_aq_tot = (ch4_aq_uM * v_liq) / 1000, # total micromoles of ch4 in water after headspace equilibration
-                ch4_final_uM = ((ch4_hs_tot + ch4_aq_tot) / v_liq) * 1000, # final concentration of dissolved ch4 in original water sample
+                # solubility at given temperature and salinity
+                sol_co2 = solubility_co2(temp_k, salin), # solubility of co2 in mol/L/atm
+                beta_ch4 = solubility_ch4(temp_k, salin), # solubility of ch4 as L gas (STP) per L water per atm
                 
-                # calculations for technical standard deviation for co2
-                sd_co2_hs_atm = sd_co2 * 1e-06 * p_dry_co2, # co2 partial pressure in headspace converted from ppm to atm
-                sd_co2_hs_pa = sd_co2_hs_atm * 101325, # co2 concentration in headspace converted from atm to Pa
-                sd_co2_hs_uM = (sd_co2_hs_pa / (8.314 * temp_k)) * 1000, # co2 concentration in headspace converted from Pa to micromole/L
-                sd_co2_hs_tot = (sd_co2_hs_uM * v_hs) / 1000, # total micromoles of co2 in headspace
-                sd_co2_aq_uM = sol_co2 * sd_co2_hs_atm * 1e6, # co2 concentration in water after headspace equilibration in micromole/L (no conversion by molar volume needed for co2)
-                sd_co2_aq_tot = (sd_co2_aq_uM * v_liq) / 1000, # total micromoles of co2 in water after headspace equilibration
-                sd_co2_final_uM = ((sd_co2_hs_tot + sd_co2_aq_tot) / v_liq) * 1000, # final concentration of dissolved co2 in original water sample
+                # CO2 concentrations (12C, 13C and total)
+                co2_12_final_uM = dissolved_co2_uM(co2_12_meas, temp_k, p_dry, v_hs, v_liq, sol_co2),
+                co2_13_final_uM = dissolved_co2_uM(co2_13_meas, temp_k, p_dry, v_hs, v_liq, sol_co2),
+                co2_total_final_uM = co2_12_final_uM + co2_13_final_uM,
                 
-                # calculations for technical standard deviation for ch4
-                sd_ch4_hs_atm = sd_ch4 * 1e-06 * p_dry_ch4, # ch4 partial pressure in headspace converted from ppm to atm
-                sd_ch4_hs_pa = sd_ch4_hs_atm * 101325, # ch4 concentration in headspace converted from atm to Pa
-                sd_ch4_hs_uM = (sd_ch4_hs_pa / (8.314 * temp_k)) * 1000, # ch4 concentration in headspace converted from Pa to micromole/L
-                sd_ch4_hs_tot = (sd_ch4_hs_uM * v_hs) / 1000, # total micromoles of ch4 in headspace
-                sd_ch4_aq_uM = beta_ch4 * sd_ch4_hs_atm / 22.414 * 1e6, # ch4 concentration in water after headspace equilibration in micromole/L (divide by molar volume to convert beta to mol/L/atm)
-                sd_ch4_aq_tot = (sd_ch4_aq_uM * v_liq) / 1000, # total micromoles of ch4 in water after headspace equilibration
-                sd_ch4_final_uM = ((sd_ch4_hs_tot + sd_ch4_aq_tot) / v_liq) * 1000 # final concentration of dissolved ch4 in original water sample
+                # CH4 concentrations (12C, 13C and total)
+                ch4_12_final_uM = dissolved_ch4_uM(ch4_12_meas, temp_k, p_dry, v_hs, v_liq, beta_ch4),
+                ch4_13_final_uM = dissolved_ch4_uM(ch4_13_meas, temp_k, p_dry, v_hs, v_liq, beta_ch4),
+                ch4_total_final_uM = ch4_12_final_uM + ch4_13_final_uM,
+                
+                # technical standard deviations for 12C and 13C
+                sd_co2_12_final_uM = dissolved_co2_uM(sd_co2_12, temp_k, p_dry, v_hs, v_liq, sol_co2),
+                sd_co2_13_final_uM = dissolved_co2_uM(sd_co2_13, temp_k, p_dry, v_hs, v_liq, sol_co2),
+                sd_ch4_12_final_uM = dissolved_ch4_uM(sd_ch4_12, temp_k, p_dry, v_hs, v_liq, beta_ch4),
+                sd_ch4_13_final_uM = dissolved_ch4_uM(sd_ch4_13, temp_k, p_dry, v_hs, v_liq, beta_ch4),
+                sd_co2_total_final_uM = dissolved_co2_uM(sd_co2_total, temp_k, p_dry, v_hs, v_liq, sol_co2),
+                sd_ch4_total_final_uM = dissolved_ch4_uM(sd_ch4_total, temp_k, p_dry, v_hs, v_liq, beta_ch4),
+                
+                # concentrations in nmol/L (1 uM = 1000 nmol/L)
+                co2_12_final_nmol_L = co2_12_final_uM * 1000,
+                co2_13_final_nmol_L = co2_13_final_uM * 1000,
+                co2_total_final_nmol_L = co2_total_final_uM * 1000,
+                ch4_12_final_nmol_L = ch4_12_final_uM * 1000,
+                ch4_13_final_nmol_L = ch4_13_final_uM * 1000,
+                ch4_total_final_nmol_L = ch4_total_final_uM * 1000,
+                
+                # isotope ratios, delta13C and atom fraction from micromolar concentrations
+                R_ch4 = ch4_13_final_uM / ch4_12_final_uM,
+                delta13C_ch4_permil = (R_ch4 / 0.0111802 - 1) * 1000,
+                AF_13C_ch4 = ch4_13_final_uM / ch4_total_final_uM,
+                
+                R_co2 = co2_13_final_uM / co2_12_final_uM,
+                delta13C_co2_permil = (R_co2 / 0.0111802 - 1) * 1000,
+                AF_13C_co2 = co2_13_final_uM / co2_total_final_uM
             )
         
     })
@@ -910,16 +980,14 @@ server <- function(input, output) { # begin server function
         
         calc_conc_raw() %>%
             select(c("data_file", "date", "sample_name",
-                     "co2_final_uM", "sd_co2_final_uM",
-                     "ch4_final_uM", "sd_ch4_final_uM",
-                     "mean_d13C_co2_permil", "sd_d13C_co2_permil",
-                     "mean_d13C_ch4_permil", "sd_d13C_ch4_permil")) %>%
-            rename(co2_uM = co2_final_uM,
-                   sd_co2_uM = sd_co2_final_uM,
-                   ch4_uM = ch4_final_uM,
-                   sd_ch4_uM = sd_ch4_final_uM,
-                   d13C_co2_permil = mean_d13C_co2_permil,
-                   d13C_ch4_permil = mean_d13C_ch4_permil)
+                     "co2_12_final_uM", "sd_co2_12_final_uM", "co2_12_final_nmol_L",
+                     "co2_13_final_uM", "sd_co2_13_final_uM", "co2_13_final_nmol_L",
+                     "co2_total_final_uM", "sd_co2_total_final_uM", "co2_total_final_nmol_L",
+                     "ch4_12_final_uM", "sd_ch4_12_final_uM", "ch4_12_final_nmol_L",
+                     "ch4_13_final_uM", "sd_ch4_13_final_uM", "ch4_13_final_nmol_L",
+                     "ch4_total_final_uM", "sd_ch4_total_final_uM", "ch4_total_final_nmol_L",
+                     "R_ch4", "delta13C_ch4_permil", "AF_13C_ch4",
+                     "R_co2", "delta13C_co2_permil", "AF_13C_co2"))
         
     })
     
